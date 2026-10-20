@@ -1,7 +1,6 @@
 import socket
 import time
 
-# Патч для принудительного использования IPv4
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
@@ -19,6 +18,10 @@ import docx
 
 st.set_page_config(page_title="Анализатор", layout="centered")
 st.title("Анализатор документов")
+
+# Создаем постоянное соединение (Session), чтобы не тратить 30 секунд на подключение каждый раз
+if "http_session" not in st.session_state:
+    st.session_state.http_session = requests.Session()
 
 api_keys = st.secrets.get("GEMINI_API_KEYS", [])
 
@@ -107,7 +110,6 @@ if uploaded_file is not None:
             }
 
         current_key = api_keys[st.session_state.current_key_index]
-        # Используем указанную вами модель
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key={current_key}"
         
         start_time = time.time()
@@ -115,8 +117,8 @@ if uploaded_file is not None:
         def stream_direct():
             first_chunk = True
             try:
-                # Таймаут убран. Запрос будет ждать ответа неограниченное время.
-                response = requests.post(url, json=payload, stream=True)
+                # Отправляем запрос через постоянную сессию, без таймаута
+                response = st.session_state.http_session.post(url, json=payload, stream=True)
                 
                 if response.status_code == 429:
                     st.session_state.current_key_index += 1
@@ -127,29 +129,28 @@ if uploaded_file is not None:
                         yield f"Лимит исчерпан. Переключение на ключ №{st.session_state.current_key_index + 1}. Нажмите кнопку еще раз."
                     return
                 elif response.status_code == 503:
-                    yield "Серверы Google сейчас перегружены (503). Пожалуйста, нажмите кнопку 'Проанализировать' еще раз."
+                    yield "Серверы Google сейчас перегружены. Пожалуйста, нажмите кнопку 'Проанализировать' еще раз."
                     return
                 elif response.status_code != 200:
                     yield f"Ошибка API ({response.status_code}): {response.text}"
                     return
 
-                for line in response.iter_lines():
-                    if line:
-                        decoded_line = line.decode('utf-8')
-                        if decoded_line.startswith("data: "):
-                            json_data = decoded_line[6:]
-                            try:
-                                data = json.loads(json_data)
-                                text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
+                # Читаем данные напрямую, чтобы избежать буферизации
+                for line in response.iter_lines(decode_unicode=True):
+                    if line and line.startswith("data: "):
+                        json_data = line[6:]
+                        try:
+                            data = json.loads(json_data)
+                            text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
+                            
+                            if first_chunk:
+                                elapsed = time.time() - start_time
+                                st.toast(f"Отклик: {elapsed:.1f} сек.")
+                                first_chunk = False
                                 
-                                if first_chunk:
-                                    elapsed = time.time() - start_time
-                                    st.toast(f"Время отклика: {elapsed:.1f} сек.")
-                                    first_chunk = False
-                                    
-                                yield text_chunk
-                            except (KeyError, json.JSONDecodeError, IndexError):
-                                pass
+                            yield text_chunk
+                        except (KeyError, json.JSONDecodeError, IndexError):
+                            pass
             except requests.exceptions.RequestException as e:
                 yield f"Сетевая ошибка: {e}"
 
