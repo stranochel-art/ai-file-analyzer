@@ -1,13 +1,11 @@
 import socket
 
-# --- ХАКЕРСКИЙ ПАТЧ СЕТИ (УБИРАЕТ 20-СЕКУНДНУЮ ЗАДЕРЖКУ) ---
-# Заставляем Python использовать только IPv4, чтобы не ждать таймаутов Streamlit
+# Патч для принудительного использования IPv4 (решает проблему долгого соединения)
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
     return [response for response in responses if response[0] == socket.AF_INET]
 socket.getaddrinfo = new_getaddrinfo
-# -----------------------------------------------------------
 
 import streamlit as st
 import requests
@@ -19,15 +17,14 @@ from PIL import Image
 import PyPDF2
 import docx
 
-st.set_page_config(page_title="AI Анализатор (Турбо + Фото)", page_icon="⚡", layout="wide")
-st.title("Умный анализатор (Исправленный) 🚀")
+st.set_page_config(page_title="Анализатор файлов", layout="wide")
+st.title("Анализатор документов и изображений")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("API ключ не найден.")
     st.stop()
 
-# Память
 for key in ["extracted_text", "image_b64", "processed_file_name"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -55,9 +52,7 @@ if uploaded_file is not None:
                     d = docx.Document(uploaded_file)
                     st.session_state.extracted_text = "\n".join(p.text for p in d.paragraphs)
                 else:
-                    # Картинка
                     img = Image.open(uploaded_file)
-                    # Если картинка в формате RGBA (PNG с прозрачностью), конвертируем в RGB
                     if img.mode == 'RGBA':
                         img = img.convert('RGB')
                     img.thumbnail((800, 800))
@@ -72,7 +67,7 @@ if uploaded_file is not None:
                 st.stop()
 
     if st.session_state.image_b64:
-        st.success("Картинка загружена!")
+        st.success("Изображение загружено.")
     else:
         with st.expander("Посмотреть извлечённый текст"):
             st.text(st.session_state.extracted_text[:1000] + "...")
@@ -80,10 +75,9 @@ if uploaded_file is not None:
     default_prompt = "Опиши эту картинку детально." if st.session_state.image_b64 else "Сделай выжимку этого текста."
     user_prompt = st.text_input("Запрос:", default_prompt)
 
-    if st.button("🚀 Проанализировать мгновенно"):
-        st.markdown("### 🤖 Ответ:")
+    if st.button("Проанализировать"):
+        st.markdown("### Ответ:")
         
-        # 1. Формируем правильный JSON (исправлен регистр букв: inlineData, mimeType)
         if st.session_state.image_b64:
             payload = {
                 "contents": [{
@@ -109,11 +103,11 @@ if uploaded_file is not None:
             first_chunk = True
             
             try:
-                # Отправляем запрос
-                response = requests.post(url, json=payload, stream=True, timeout=10) # Добавил жесткий таймаут
+                # Таймаут увеличен до 30 секунд для передачи изображений
+                response = requests.post(url, json=payload, stream=True, timeout=30)
                 
                 if response.status_code != 200:
-                    yield f"❌ Ошибка: {response.text}"
+                    yield f"Ошибка API: {response.text}"
                     return
 
                 for line in response.iter_lines():
@@ -127,13 +121,13 @@ if uploaded_file is not None:
                                 
                                 if first_chunk:
                                     ping = time.time() - start_time
-                                    st.toast(f"Отклик сети: {ping:.1f} сек.", icon="🏎️")
+                                    st.toast(f"Время отклика: {ping:.1f} сек.")
                                     first_chunk = False
                                     
                                 yield text_chunk
                             except (KeyError, json.JSONDecodeError, IndexError):
                                 pass
             except requests.exceptions.RequestException as e:
-                yield f"❌ Ошибка сети: {e}"
+                yield f"Ошибка сети: {e}"
 
         st.write_stream(stream_direct)
