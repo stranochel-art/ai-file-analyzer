@@ -88,7 +88,7 @@ if uploaded_file is not None:
             }
 
         # 2. Прямая ссылка на API (используем стабильную и самую быструю модель 1.5-flash)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse&key={api_key}"
         
         start_time = time.time()
 
