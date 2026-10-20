@@ -12,7 +12,7 @@ import requests
 import json
 import base64
 from io import BytesIO
-from PIL import Image
+from PIL import Imageа
 import PyPDF2
 import docx
 
@@ -109,7 +109,7 @@ if uploaded_file is not None:
             }
 
         current_key = api_keys[st.session_state.current_key_index]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key={current_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse&key={current_key}"
         
         # Заголовки для принудительного стриминга (отключают буферизацию)
         headers = {
