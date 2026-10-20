@@ -25,11 +25,11 @@ client = get_client()
 st.sidebar.header("⚙️ Настройки")
 model_name = st.sidebar.selectbox(
     "Модель",
-    ["gemini-2.5-flash-lite", "gemini-2.5-flash", "Своя..."],
+    ["gemini-3.5-flash-lite", "gemini-3.5-flash", "Своя..."],
     help="flash-lite — самая быстрая. flash — умнее, но чуть медленнее."
 )
 if model_name == "Своя...":
-    model_name = st.sidebar.text_input("Точное название модели", "gemini-2.5-flash")
+    model_name = st.sidebar.text_input("Точное название модели", "gemini-3.5-flash")
 
 fast_mode = st.sidebar.toggle("⚡ Быстрый режим (без долгих размышлений)", value=True)
 
