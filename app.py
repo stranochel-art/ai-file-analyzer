@@ -4,93 +4,93 @@ from PIL import Image
 import PyPDF2
 import docx
 
-# --- НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="Умный AI Анализатор", page_icon="🧠", layout="wide")
-st.title("Умный анализатор: Текст, PDF, Word и Картинки 📄🖼️")
+st.title("Умный анализатор (Ускоренная версия) ⚡")
 
-# --- НАСТРОЙКА API КЛЮЧА ---
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
-    st.error("API ключ не найден. Настройте его в Secrets.")
+    st.error("API ключ не найден.")
     st.stop()
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-3.8-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- ИНТЕРФЕЙС ЗАГРУЗКИ (ДОБАВИЛИ НОВЫЕ ФОРМАТЫ) ---
+# --- СОЗДАЕМ "ПАМЯТЬ" ДЛЯ САЙТА ---
+if 'extracted_text' not in st.session_state:
+    st.session_state.extracted_text = ""
+if 'image_data' not in st.session_state:
+    st.session_state.image_data = None
+if 'processed_file_name' not in st.session_state:
+    st.session_state.processed_file_name = ""
+
 uploaded_file = st.file_uploader(
     "Загрузите файл (TXT, PDF, DOCX, JPG, PNG)", 
     type=['txt', 'pdf', 'docx', 'jpg', 'jpeg', 'png']
 )
 
 if uploaded_file is not None:
-    # Определяем тип файла по расширению
     file_type = uploaded_file.name.split('.')[-1].lower()
     
-    st.success(f"Файл {uploaded_file.name} успешно загружен!")
-    
-    # --- БЛОК ЧТЕНИЯ ФАЙЛОВ ---
-    extracted_text = ""
-    image_data = None
-    
-    try:
-        # Если это текст
-        if file_type == 'txt':
-            extracted_text = uploaded_file.read().decode("utf-8")
-            with st.expander("Посмотреть текст"):
-                st.text(extracted_text[:1000] + "...")
-                
-        # Если это PDF
-        elif file_type == 'pdf':
-            pdf_reader = PyPDF2.PdfReader(uploaded_file)
-            for page in pdf_reader.pages:
-                extracted_text += page.extract_text() + "\n"
-            with st.expander("Посмотреть текст из PDF"):
-                st.text(extracted_text[:1000] + "...")
-                
-        # Если это Word
-        elif file_type == 'docx':
-            doc = docx.Document(uploaded_file)
-            for para in doc.paragraphs:
-                extracted_text += para.text + "\n"
-            with st.expander("Посмотреть текст из Word"):
-                st.text(extracted_text[:1000] + "...")
-                
-        # Если это Картинка
-        elif file_type in ['jpg', 'jpeg', 'png']:
-            image_data = Image.open(uploaded_file)
-            st.image(image_data, caption="Загруженное изображение", use_column_width=True)
+    # Читаем файл ТОЛЬКО ЕСЛИ это новый файл (чтобы не тратить время при нажатии кнопки)
+    if st.session_state.processed_file_name != uploaded_file.name:
+        with st.spinner("Извлекаем данные из файла..."):
+            st.session_state.extracted_text = ""
+            st.session_state.image_data = None
             
-    except Exception as e:
-        st.error(f"Ошибка при чтении файла: {e}")
-        st.stop()
+            try:
+                if file_type == 'txt':
+                    st.session_state.extracted_text = uploaded_file.read().decode("utf-8")
+                
+                elif file_type == 'pdf':
+                    pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                    for page in pdf_reader.pages:
+                        st.session_state.extracted_text += page.extract_text() + "\n"
+                        
+                elif file_type == 'docx':
+                    doc = docx.Document(uploaded_file)
+                    for para in doc.paragraphs:
+                        st.session_state.extracted_text += para.text + "\n"
+                        
+                elif file_type in ['jpg', 'jpeg', 'png']:
+                    image = Image.open(uploaded_file)
+                    # МАГИЯ УСКОРЕНИЯ: Сжимаем огромные фото перед отправкой
+                    image.thumbnail((1024, 1024))
+                    st.session_state.image_data = image
+                    
+                st.session_state.processed_file_name = uploaded_file.name
+            except Exception as e:
+                st.error(f"Ошибка при чтении: {e}")
+                st.stop()
+
+    st.success(f"Файл готов к анализу!")
+    
+    # Показываем превью
+    if st.session_state.image_data:
+        st.image(st.session_state.image_data, caption="Превью (оптимизировано)", width=300)
+    else:
+        with st.expander("Посмотреть извлеченный текст"):
+            st.text(st.session_state.extracted_text[:1000] + "...")
 
     # --- БЛОК АНАЛИЗА ---
-    st.markdown("### Что сделать с этим файлом?")
-    
-    # Меняем подсказку в зависимости от файла
-    default_prompt = "Опиши, что на этой картинке, и выдели главные детали." if image_data else "Сделай краткую выжимку (саммари) этого текста."
+    default_prompt = "Опиши, что на этой картинке." if st.session_state.image_data else "Сделай краткую выжимку (саммари) этого текста."
     user_prompt = st.text_input("Ваш запрос нейросети:", default_prompt)
     
-    if st.button("🚀 Проанализировать"):
-        # Убрали spinner (крутилку), так как ответ начнется мгновенно
+    if st.button("🚀 Проанализировать мгновенно"):
+        st.markdown("### 🤖 Ответ нейросети:")
+        
         try:
-            st.markdown("### 🤖 Ответ нейросети:")
-            
-            # Отправляем запрос с параметром stream=True (потоковый ответ)
-            if image_data:
-                response = model.generate_content([user_prompt, image_data], stream=True)
+            # Берем данные прямо из быстрой памяти
+            if st.session_state.image_data:
+                response = model.generate_content([user_prompt, st.session_state.image_data], stream=True)
             else:
-                # Ограничиваем текст, если он слишком огромный (например, берем первые 300000 символов)
-                safe_text = extracted_text[:300000]
+                safe_text = st.session_state.extracted_text[:30000]
                 response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{safe_text}", stream=True)
             
-            # Функция для побуквенного вывода
+            # Потоковый вывод
             def stream_text():
                 for chunk in response:
                     yield chunk.text
                     
-            # Streamlit сам красиво выведет текст с анимацией печати
             st.write_stream(stream_text)
             
         except Exception as e:
