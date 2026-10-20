@@ -19,7 +19,6 @@ import docx
 st.set_page_config(page_title="Анализатор", layout="centered")
 st.title("Анализатор документов")
 
-# Создаем постоянное соединение (Session), чтобы не тратить 30 секунд на подключение каждый раз
 if "http_session" not in st.session_state:
     st.session_state.http_session = requests.Session()
 
@@ -112,13 +111,19 @@ if uploaded_file is not None:
         current_key = api_keys[st.session_state.current_key_index]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key={current_key}"
         
+        # Заголовки для принудительного стриминга (отключают буферизацию)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache"
+        }
+        
         start_time = time.time()
         
         def stream_direct():
             first_chunk = True
             try:
-                # Отправляем запрос через постоянную сессию, без таймаута
-                response = st.session_state.http_session.post(url, json=payload, stream=True)
+                response = st.session_state.http_session.post(url, json=payload, headers=headers, stream=True)
                 
                 if response.status_code == 429:
                     st.session_state.current_key_index += 1
@@ -135,22 +140,24 @@ if uploaded_file is not None:
                     yield f"Ошибка API ({response.status_code}): {response.text}"
                     return
 
-                # Читаем данные напрямую, чтобы избежать буферизации
-                for line in response.iter_lines(decode_unicode=True):
-                    if line and line.startswith("data: "):
-                        json_data = line[6:]
-                        try:
-                            data = json.loads(json_data)
-                            text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
-                            
-                            if first_chunk:
-                                elapsed = time.time() - start_time
-                                st.toast(f"Отклик: {elapsed:.1f} сек.")
-                                first_chunk = False
+                # Ручная расшифровка в UTF-8 убирает ломанный текст
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode('utf-8')
+                        if decoded_line.startswith("data: "):
+                            json_data = decoded_line[6:]
+                            try:
+                                data = json.loads(json_data)
+                                text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
                                 
-                            yield text_chunk
-                        except (KeyError, json.JSONDecodeError, IndexError):
-                            pass
+                                if first_chunk:
+                                    elapsed = time.time() - start_time
+                                    st.toast(f"Отклик: {elapsed:.1f} сек.")
+                                    first_chunk = False
+                                    
+                                yield text_chunk
+                            except (KeyError, json.JSONDecodeError, IndexError):
+                                pass
             except requests.exceptions.RequestException as e:
                 yield f"Сетевая ошибка: {e}"
 
