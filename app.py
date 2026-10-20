@@ -17,10 +17,22 @@ import PyPDF2
 import docx
 
 # ==================== НАСТРОЙКИ ====================
-MODEL             = "gemini-3.8-flash"   # было: gemini-3.6-flash
-THINKING_DEFAULT  = "low"                # ГЛАВНОЕ ИЗМЕНЕНИЕ (было не задано = medium)
-MAX_CHARS         = 60000                # было: 15000 (у Gemini 3.x контекст 1M токенов)
-MAX_OUTPUT_TOKENS = 2048                 # не ставьте <1024: лимит режет и thinking тоже
+# Модель по умолчанию — 3.6-flash: на вашем ключе она быстрая и поддерживает
+# уровень "minimal", который реально убирает задержку на рассуждения.
+# 3.8-flash оставлен в списке — включайте, когда нужен именно глубокий разбор.
+MODELS = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+
+# Какие уровни размышлений поддерживает каждая модель
+THINKING_LEVELS = {
+    "gemini-3.6-flash":    ["minimal", "low", "medium", "high"],
+    "gemini-3.8-flash":    ["low", "medium", "high"],   # minimal у 3.8 недоступен
+    "gemini-3.5-flash-lite": ["minimal", "low", "medium", "high"],
+}
+
+# Сколько токенов ответа разрешить (включает и thinking-токены!)
+MAX_OUTPUT_BY_THINKING = {"minimal": 1024, "low": 1024, "medium": 2048, "high": 4096}
+
+MAX_CHARS = 15000   # вернули как было: 60000 упиралось в лимит токенов/минуту
 # requirements.txt не изменился: streamlit, requests, Pillow, PyPDF2, python-docx
 # ===================================================
 
@@ -46,6 +58,28 @@ if "current_key_index" not in st.session_state:
 for key in ["extracted_text", "image_b64", "processed_file_name"]:
     if key not in st.session_state:
         st.session_state[key] = None
+
+
+def diagnose(ttfb, total, prompt_tokens, thoughts, answer_tokens, cached):
+    """Короткий вердикт по цифрам, чтобы не гадать, где тормозит."""
+    if ttfb and ttfb > 25 and prompt_tokens > 8000:
+        return ("Упор в лимит токенов/минуту бесплатного тарифа: большой вход "
+                f"({prompt_tokens} ток.) ставится в очередь. Уменьшите MAX_CHARS "
+                "или добавьте второй ключ в GEMINI_API_KEYS.")
+    if thoughts > 800:
+        return (f"Модель сожгла {thoughts} ток. на внутренние рассуждения до первого "
+                "символа. Поставьте уровень размышлений ниже (minimal/low).")
+    if ttfb and ttfb < 6 and total > 40:
+        return (f"Старт быстрый ({ttfb:.1f} с), но ответ длинный ({answer_tokens} ток.). "
+                "Снизьте лимит ответа или попросите «ответь в 5 предложениях».")
+    if ttfb and ttfb > 25:
+        return ("Запрос маленький, а ожидание большое — очередь/троттлинг на стороне API "
+                "именно для этой модели. Попробуйте другую модель или другой ключ.")
+    if prompt_tokens > 4000 and cached == 0:
+        return ("Работает в норме, но префикс не попадает в кэш Google: проверьте, что "
+                "текст документа идёт первым партсом, а вопрос — последним.")
+    return "Норма: задержка соответствует выбранной модели и уровню размышлений."
+
 
 uploaded_file = st.file_uploader(
     "Файл (TXT, PDF, DOCX, JPG, PNG)",
@@ -94,14 +128,17 @@ if uploaded_file is not None:
 
     with st.form("analyze_form"):
         user_prompt = st.text_input("Запрос:", default_prompt)
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
+
+        col_m, col_t, col_b = st.columns([2, 1.4, 1])
+        with col_m:
+            model = st.selectbox("Модель", MODELS, index=0)
+        with col_t:
+            levels = THINKING_LEVELS[model]
             thinking_level = st.selectbox(
-                "Глубина размышлений",
-                ["low", "medium", "high"],
-                index=["low", "medium", "high"].index(THINKING_DEFAULT),
-                help="low = быстро и умно (для выжимок, фактов, перевода). "
-                     "medium/high — для сложных рассуждений, но заметно дольше."
+                "Размышления",
+                levels,
+                index=0,
+                help="minimal/low = быстро. medium/high = дольше, но лучше на сложных задачах."
             )
         with col_b:
             st.write("")
@@ -113,7 +150,7 @@ if uploaded_file is not None:
 
         generation_config = {
             "thinkingConfig": {"thinkingLevel": thinking_level},
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            "maxOutputTokens": MAX_OUTPUT_BY_THINKING.get(thinking_level, 1024),
         }
 
         if st.session_state.image_b64:
@@ -132,7 +169,7 @@ if uploaded_file is not None:
                 "contents": [{
                     "parts": [
                         # Документ ПЕРВЫМ, вопрос ПОСЛЕДНИМ: префикс запроса совпадает
-                        # между разными вопросами к одному файлу -> работает implicit caching.
+                        # между разными вопросами к одному файлу -> работает кэш Google.
                         {"text": f"Текст:\n{safe_text}"},
                         {"text": f"\n\nЗадача: {user_prompt}"}
                     ]
@@ -141,16 +178,18 @@ if uploaded_file is not None:
             }
 
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{MODEL}:streamGenerateContent?alt=sse")
+               f"{model}:streamGenerateContent?alt=sse")
 
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
-            "x-goog-api-key": ""   # подставляется для каждого ключа (ключ больше не в URL)
+            "x-goog-api-key": ""   # ключ в заголовке, а не в URL (не светится в логах)
         }
 
         start_time = time.time()
+        st.session_state.ttfb = None
+        st.session_state.last_usage = {}
 
         def stream_direct():
             first_chunk = True
@@ -158,7 +197,7 @@ if uploaded_file is not None:
             start_index = st.session_state.current_key_index
 
             # Перебор ключей ВНУТРИ одного запуска: при 429 сразу берём следующий,
-            # вместо «нажмите кнопку ещё раз».
+            # а не просим пользователя нажать кнопку ещё раз.
             for i in range(total_keys):
                 key_index = (start_index + i) % total_keys
                 headers["x-goog-api-key"] = api_keys[key_index]
@@ -194,6 +233,10 @@ if uploaded_file is not None:
                     except json.JSONDecodeError:
                         continue
 
+                    # служебная статистика приходит в последнем чанке
+                    if data.get("usageMetadata"):
+                        st.session_state.last_usage = data["usageMetadata"]
+
                     parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
                     for part in parts:
                         if part.get("thought"):        # внутренние рассуждения — не в ответ
@@ -202,8 +245,8 @@ if uploaded_file is not None:
                         if not text_chunk:
                             continue
                         if first_chunk:
-                            elapsed = time.time() - start_time
-                            st.toast(f"Отклик: {elapsed:.1f} сек.")
+                            st.session_state.ttfb = time.time() - start_time
+                            st.toast(f"Отклик: {st.session_state.ttfb:.1f} сек.")
                             first_chunk = False
                         yield text_chunk
 
@@ -213,3 +256,28 @@ if uploaded_file is not None:
             yield "Ошибка: Лимиты на всех ключах исчерпаны. Повторите примерно через минуту."
 
         st.write_stream(stream_direct)
+
+        # ==================== ДИАГНОСТИКА СКОРОСТИ ====================
+        u = st.session_state.last_usage or {}
+        ttfb = st.session_state.ttfb or 0
+        total = time.time() - start_time
+        prompt_tokens = u.get("promptTokenCount", 0)
+        thoughts = u.get("thoughtsTokenCount", 0)
+        answer_tokens = u.get("candidatesTokenCount", 0)
+        cached = u.get("cachedContentTokenCount", 0)
+
+        with st.expander("Замеры и вердикт"):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Первый токен", f"{ttfb:.1f} с")
+            c2.metric("Всего", f"{total:.1f} с")
+            c3.metric("Thinking", f"{thoughts} ток.")
+            c4.metric("Ответ", f"{answer_tokens} ток.")
+            st.caption(
+                f"модель: {model} · размышления: {thinking_level} · "
+                f"вход: {prompt_tokens} ток. · из кэша: {cached} ток. · "
+                f"ключей в пуле: {len(api_keys)}"
+            )
+            if u:
+                st.info(diagnose(ttfb, total, prompt_tokens, thoughts, answer_tokens, cached))
+            else:
+                st.warning("Статистика от API не пришла — вероятно, ответ оборвался с ошибкой.")
