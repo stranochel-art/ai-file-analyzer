@@ -16,7 +16,7 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini')
+model = genai.GenerativeModel('gemini-3.8-flash')
 
 # --- ИНТЕРФЕЙС ЗАГРУЗКИ ---
 uploaded_file = st.file_uploader("Выберите файл (.txt)", type=['txt'])
