@@ -5,7 +5,7 @@ import PyPDF2
 import docx
 
 st.set_page_config(page_title="Умный AI Анализатор", page_icon="🧠", layout="wide")
-st.title("Умный анализатор (Ускоренная версия) ⚡")
+st.title("Умный анализатор⚡")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
@@ -13,7 +13,7 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-3.8-flash')
 
 # --- СОЗДАЕМ "ПАМЯТЬ" ДЛЯ САЙТА ---
 if 'extracted_text' not in st.session_state:
@@ -66,7 +66,7 @@ if uploaded_file is not None:
     
     # Показываем превью
     if st.session_state.image_data:
-        st.image(st.session_state.image_data, caption="Превью (оптимизировано)", width=300)
+        st.image(st.session_state.image_data, caption="Превью", width=300)
     else:
         with st.expander("Посмотреть извлеченный текст"):
             st.text(st.session_state.extracted_text[:1000] + "...")
@@ -75,7 +75,7 @@ if uploaded_file is not None:
     default_prompt = "Опиши, что на этой картинке." if st.session_state.image_data else "Сделай краткую выжимку (саммари) этого текста."
     user_prompt = st.text_input("Ваш запрос нейросети:", default_prompt)
     
-    if st.button("🚀 Проанализировать мгновенно"):
+    if st.button("🚀 Проанализировать"):
         st.markdown("### 🤖 Ответ нейросети:")
         
         try:
