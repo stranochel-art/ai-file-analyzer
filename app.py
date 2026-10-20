@@ -1,16 +1,15 @@
 import streamlit as st
 import google.generativeai as genai
-import os
+from PIL import Image
+import PyPDF2
+import docx
 
 # --- НАСТРОЙКА СТРАНИЦЫ ---
-st.set_page_config(page_title="AI Анализатор файлов", page_icon="🤖")
-st.title("Бесплатный анализатор документов 📄")
-st.write("Загрузите текстовый файл, и нейросеть сделает его краткий анализ.")
+st.set_page_config(page_title="Умный AI Анализатор", page_icon="🧠", layout="wide")
+st.title("Умный анализатор: Текст, PDF, Word и Картинки 📄🖼️")
 
 # --- НАСТРОЙКА API КЛЮЧА ---
-# Сервер Streamlit будет брать ключ из безопасного хранилища (Secrets)
 api_key = st.secrets.get("GEMINI_API_KEY")
-
 if not api_key:
     st.error("API ключ не найден. Настройте его в Secrets.")
     st.stop()
@@ -18,34 +17,73 @@ if not api_key:
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-3.8-flash')
 
-# --- ИНТЕРФЕЙС ЗАГРУЗКИ ---
-uploaded_file = st.file_uploader("Выберите файл (.txt)", type=['txt'])
+# --- ИНТЕРФЕЙС ЗАГРУЗКИ (ДОБАВИЛИ НОВЫЕ ФОРМАТЫ) ---
+uploaded_file = st.file_uploader(
+    "Загрузите файл (TXT, PDF, DOCX, JPG, PNG)", 
+    type=['txt', 'pdf', 'docx', 'jpg', 'jpeg', 'png']
+)
 
 if uploaded_file is not None:
-    # Читаем содержимое файла
-    file_content = uploaded_file.read().decode("utf-8")
+    # Определяем тип файла по расширению
+    file_type = uploaded_file.name.split('.')[-1].lower()
     
-    # Показываем кусочек текста пользователю, чтобы он видел, что всё загрузилось
-    with st.expander("Посмотреть содержимое файла"):
-        st.text(file_content[:500] + "...\n(текст обрезан для предпросмотра)")
+    st.success(f"Файл {uploaded_file.name} успешно загружен!")
     
+    # --- БЛОК ЧТЕНИЯ ФАЙЛОВ ---
+    extracted_text = ""
+    image_data = None
+    
+    try:
+        # Если это текст
+        if file_type == 'txt':
+            extracted_text = uploaded_file.read().decode("utf-8")
+            with st.expander("Посмотреть текст"):
+                st.text(extracted_text[:1000] + "...")
+                
+        # Если это PDF
+        elif file_type == 'pdf':
+            pdf_reader = PyPDF2.PdfReader(uploaded_file)
+            for page in pdf_reader.pages:
+                extracted_text += page.extract_text() + "\n"
+            with st.expander("Посмотреть текст из PDF"):
+                st.text(extracted_text[:1000] + "...")
+                
+        # Если это Word
+        elif file_type == 'docx':
+            doc = docx.Document(uploaded_file)
+            for para in doc.paragraphs:
+                extracted_text += para.text + "\n"
+            with st.expander("Посмотреть текст из Word"):
+                st.text(extracted_text[:1000] + "...")
+                
+        # Если это Картинка
+        elif file_type in ['jpg', 'jpeg', 'png']:
+            image_data = Image.open(uploaded_file)
+            st.image(image_data, caption="Загруженное изображение", use_column_width=True)
+            
+    except Exception as e:
+        st.error(f"Ошибка при чтении файла: {e}")
+        st.stop()
+
     # --- БЛОК АНАЛИЗА ---
-    st.markdown("### Что нужно сделать с файлом?")
-    # Пользователь сам может написать, что ему нужно (по умолчанию стоит саммари)
-    user_prompt = st.text_input("Напишите ваш запрос:", "Сделай краткую выжимку (саммари) этого текста, выдели главные мысли.")
+    st.markdown("### Что сделать с этим файлом?")
     
-    if st.button("🚀 Проанализировать файл"):
-        with st.spinner("Нейросеть читает и думает... Пожалуйста, подождите."):
+    # Меняем подсказку в зависимости от файла
+    default_prompt = "Опиши, что на этой картинке, и выдели главные детали." if image_data else "Сделай краткую выжимку (саммари) этого текста."
+    user_prompt = st.text_input("Ваш запрос нейросети:", default_prompt)
+    
+    if st.button("🚀 Проанализировать"):
+        with st.spinner("Нейросеть работает..."):
             try:
-                # Формируем запрос: Команда пользователя + Текст файла
-                full_prompt = f"{user_prompt}\n\nТекст файла:\n{file_content}"
+                # Отправляем запрос. Если есть картинка - шлем картинку, если текст - шлем текст.
+                if image_data:
+                    response = model.generate_content([user_prompt, image_data])
+                else:
+                    response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{extracted_text}")
                 
-                # Отправляем в Google Gemini
-                response = model.generate_content(full_prompt)
-                
-                # Выводим красивый результат
-                st.success("Анализ завершен!")
-                st.write(response.text)
+                # Выводим результат
+                st.markdown("### 🤖 Ответ нейросети:")
+                st.info(response.text)
                 
             except Exception as e:
-                st.error(f"Произошла ошибка при обращении к нейросети: {e}")
+                st.error(f"Ошибка API: {e}")
