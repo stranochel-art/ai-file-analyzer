@@ -1,5 +1,5 @@
 streamlit
-google-genai
+requests
 Pillow
 PyPDF2
 python-docx
