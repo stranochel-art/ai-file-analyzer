@@ -12,7 +12,7 @@ import requests
 import json
 import base64
 from io import BytesIO
-from PIL import Imageа
+from PIL import Image
 import PyPDF2
 import docx
 
