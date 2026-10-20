@@ -76,22 +76,17 @@ if uploaded_file is not None:
     user_prompt = st.text_input("Ваш запрос нейросети:", default_prompt)
     
     if st.button("🚀 Проанализировать"):
-        st.markdown("### 🤖 Ответ нейросети:")
-        
-        try:
-            # Берем данные прямо из быстрой памяти
-            if st.session_state.image_data:
-                response = model.generate_content([user_prompt, st.session_state.image_data], stream=True)
-            else:
-                safe_text = st.session_state.extracted_text[:30000]
-                response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{safe_text}", stream=True)
-            
-            # Потоковый вывод
-            def stream_text():
-                for chunk in response:
-                    yield chunk.text
-                    
-            st.write_stream(stream_text)
-            
-        except Exception as e:
-            st.error(f"Ошибка API: {e}")
+        with st.spinner("Нейросеть работает..."):
+            try:
+                # Отправляем запрос. Если есть картинка - шлем картинку, если текст - шлем текст.
+                if image_data:
+                    response = model.generate_content([user_prompt, image_data])
+                else:
+                    response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{extracted_text}")
+                
+                # Выводим результат
+                st.markdown("### 🤖 Ответ нейросети:")
+                st.info(response.text)
+                
+            except Exception as e:
+                st.error(f"Ошибка API: {e}")
