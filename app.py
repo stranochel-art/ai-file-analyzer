@@ -1,3 +1,12 @@
+import socket
+
+# Патч для принудительного использования IPv4 (решает проблему таймаутов на Streamlit)
+old_getaddrinfo = socket.getaddrinfo
+def new_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = new_getaddrinfo
+
 import streamlit as st
 import requests
 import json
@@ -10,24 +19,19 @@ import docx
 st.set_page_config(page_title="Анализатор", layout="centered")
 st.title("Анализатор документов")
 
-# --- СИСТЕМА РОТАЦИИ КЛЮЧЕЙ ---
-# Берем список ключей из настроек
 api_keys = st.secrets.get("GEMINI_API_KEYS", [])
 
 if not api_keys:
-    # Обратная совместимость, если в настройках остался старый формат
     single_key = st.secrets.get("GEMINI_API_KEY")
     if single_key:
         api_keys = [single_key]
     else:
-        st.error("API ключи не найдены в настройках (Secrets).")
+        st.error("API ключи не найдены в настройках.")
         st.stop()
 
-# Запоминаем, какой ключ используем сейчас
 if "current_key_index" not in st.session_state:
     st.session_state.current_key_index = 0
 
-# Инициализация памяти
 for key in ["extracted_text", "image_b64", "processed_file_name"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -101,24 +105,21 @@ if uploaded_file is not None:
                 }]
             }
 
-        # Выбираем текущий ключ
         current_key = api_keys[st.session_state.current_key_index]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key={current_key}"
         
         def stream_direct():
             try:
-                response = requests.post(url, json=payload, stream=True, timeout=(5, 30))
+                # Установлен единый таймаут в 40 секунд, чтобы исключить обрывы
+                response = requests.post(url, json=payload, stream=True, timeout=40)
                 
                 if response.status_code == 429:
-                    # Если лимит исчерпан, пытаемся переключить ключ
                     st.session_state.current_key_index += 1
-                    
                     if st.session_state.current_key_index >= len(api_keys):
-                        # Если ключи кончились, возвращаем индекс на 0 (для завтрашнего дня)
                         st.session_state.current_key_index = 0
-                        yield "Ошибка: Лимиты на всех ключах исчерпаны. Ждите завтра или добавьте новые ключи."
+                        yield "Ошибка: Лимиты на всех ключах исчерпаны."
                     else:
-                        yield f"Текущий ключ исчерпан. Система переключилась на резервный ключ (№{st.session_state.current_key_index + 1}). Нажмите кнопку 'Проанализировать' еще раз."
+                        yield f"Лимит исчерпан. Переключение на ключ №{st.session_state.current_key_index + 1}. Нажмите кнопку еще раз."
                     return
                 elif response.status_code != 200:
                     yield f"Ошибка API ({response.status_code}): {response.text}"
@@ -135,7 +136,7 @@ if uploaded_file is not None:
                             except (KeyError, json.JSONDecodeError, IndexError):
                                 pass
             except requests.exceptions.Timeout:
-                yield "Ошибка: Превышено время ожидания ответа от сервера."
+                yield "Ошибка: Превышено время ожидания ответа от сервера (Таймаут)."
             except requests.exceptions.RequestException as e:
                 yield f"Сетевая ошибка: {e}"
 
