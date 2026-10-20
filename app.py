@@ -73,17 +73,25 @@ if uploaded_file is not None:
     user_prompt = st.text_input("Ваш запрос нейросети:", default_prompt)
     
     if st.button("🚀 Проанализировать"):
-        with st.spinner("Нейросеть работает..."):
-            try:
-                # Отправляем запрос. Если есть картинка - шлем картинку, если текст - шлем текст.
-                if image_data:
-                    response = model.generate_content([user_prompt, image_data])
-                else:
-                    response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{extracted_text}")
-                
-                # Выводим результат
-                st.markdown("### 🤖 Ответ нейросети:")
-                st.info(response.text)
-                
-            except Exception as e:
-                st.error(f"Ошибка API: {e}")
+        # Убрали spinner (крутилку), так как ответ начнется мгновенно
+        try:
+            st.markdown("### 🤖 Ответ нейросети:")
+            
+            # Отправляем запрос с параметром stream=True (потоковый ответ)
+            if image_data:
+                response = model.generate_content([user_prompt, image_data], stream=True)
+            else:
+                # Ограничиваем текст, если он слишком огромный (например, берем первые 300000 символов)
+                safe_text = extracted_text[:300000]
+                response = model.generate_content(f"{user_prompt}\n\nТекст файла:\n{safe_text}", stream=True)
+            
+            # Функция для побуквенного вывода
+            def stream_text():
+                for chunk in response:
+                    yield chunk.text
+                    
+            # Streamlit сам красиво выведет текст с анимацией печати
+            st.write_stream(stream_text)
+            
+        except Exception as e:
+            st.error(f"Ошибка API: {e}")
