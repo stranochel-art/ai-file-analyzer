@@ -1,3 +1,14 @@
+import socket
+
+# --- ХАКЕРСКИЙ ПАТЧ СЕТИ (УБИРАЕТ 20-СЕКУНДНУЮ ЗАДЕРЖКУ) ---
+# Заставляем Python использовать только IPv4, чтобы не ждать таймаутов Streamlit
+old_getaddrinfo = socket.getaddrinfo
+def new_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = new_getaddrinfo
+# -----------------------------------------------------------
+
 import streamlit as st
 import requests
 import json
@@ -8,15 +19,15 @@ from PIL import Image
 import PyPDF2
 import docx
 
-st.set_page_config(page_title="AI Анализатор (Прямое подключение)", page_icon="⚡", layout="wide")
-st.title("Умный анализатор (Прямой HTTP) 🚀")
+st.set_page_config(page_title="AI Анализатор (Турбо + Фото)", page_icon="⚡", layout="wide")
+st.title("Умный анализатор (Исправленный) 🚀")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("API ключ не найден.")
     st.stop()
 
-# --- ПАМЯТЬ СЕРВЕРА ---
+# Память
 for key in ["extracted_text", "image_b64", "processed_file_name"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -30,7 +41,7 @@ if uploaded_file is not None:
     file_type = uploaded_file.name.split(".")[-1].lower()
 
     if st.session_state.processed_file_name != uploaded_file.name:
-        with st.spinner("Быстрая обработка файла..."):
+        with st.spinner("Чтение файла..."):
             st.session_state.extracted_text = ""
             st.session_state.image_b64 = None
             
@@ -44,8 +55,11 @@ if uploaded_file is not None:
                     d = docx.Document(uploaded_file)
                     st.session_state.extracted_text = "\n".join(p.text for p in d.paragraphs)
                 else:
-                    # Картинка: сжимаем и переводим в Base64 для прямого запроса
+                    # Картинка
                     img = Image.open(uploaded_file)
+                    # Если картинка в формате RGBA (PNG с прозрачностью), конвертируем в RGB
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
                     img.thumbnail((800, 800))
                     
                     buffered = BytesIO()
@@ -58,24 +72,24 @@ if uploaded_file is not None:
                 st.stop()
 
     if st.session_state.image_b64:
-        st.success("Картинка загружена и сжата!")
+        st.success("Картинка загружена!")
     else:
         with st.expander("Посмотреть извлечённый текст"):
             st.text(st.session_state.extracted_text[:1000] + "...")
 
-    default_prompt = "Опиши эту картинку." if st.session_state.image_b64 else "Сделай выжимку этого текста."
+    default_prompt = "Опиши эту картинку детально." if st.session_state.image_b64 else "Сделай выжимку этого текста."
     user_prompt = st.text_input("Запрос:", default_prompt)
 
-    if st.button("🚀 Проанализировать (Без библиотек)"):
+    if st.button("🚀 Проанализировать мгновенно"):
         st.markdown("### 🤖 Ответ:")
         
-        # 1. Формируем "сырой" пакет данных для Google
+        # 1. Формируем правильный JSON (исправлен регистр букв: inlineData, mimeType)
         if st.session_state.image_b64:
             payload = {
                 "contents": [{
                     "parts": [
                         {"text": user_prompt},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": st.session_state.image_b64}}
+                        {"inlineData": {"mimeType": "image/jpeg", "data": st.session_state.image_b64}}
                     ]
                 }]
             }
@@ -87,42 +101,39 @@ if uploaded_file is not None:
                 }]
             }
 
-        # 2. Прямая ссылка на API (используем стабильную и самую быструю модель 1.5-flash)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse&key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={api_key}"
         
         start_time = time.time()
 
-        # 3. Функция, которая слушает прямой поток от Google
         def stream_direct():
             first_chunk = True
             
-            # Делаем прямой запрос
-            response = requests.post(url, json=payload, stream=True)
-            
-            if response.status_code != 200:
-                yield f"❌ Ошибка Google API: {response.text}"
-                return
+            try:
+                # Отправляем запрос
+                response = requests.post(url, json=payload, stream=True, timeout=10) # Добавил жесткий таймаут
+                
+                if response.status_code != 200:
+                    yield f"❌ Ошибка: {response.text}"
+                    return
 
-            # Читаем ответ построчно
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    # Google присылает данные с приставкой "data: "
-                    if decoded_line.startswith("data: "):
-                        json_data = decoded_line[6:] # Отрезаем "data: "
-                        try:
-                            data = json.loads(json_data)
-                            # Достаем кусок текста из сложного JSON
-                            text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
-                            
-                            if first_chunk:
-                                ping = time.time() - start_time
-                                st.toast(f"Отклик без библиотек: {ping:.1f} сек.", icon="🏎️")
-                                first_chunk = False
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode('utf-8')
+                        if decoded_line.startswith("data: "):
+                            json_data = decoded_line[6:]
+                            try:
+                                data = json.loads(json_data)
+                                text_chunk = data["candidates"][0]["content"]["parts"][0]["text"]
                                 
-                            yield text_chunk
-                        except (KeyError, json.JSONDecodeError):
-                            pass
+                                if first_chunk:
+                                    ping = time.time() - start_time
+                                    st.toast(f"Отклик сети: {ping:.1f} сек.", icon="🏎️")
+                                    first_chunk = False
+                                    
+                                yield text_chunk
+                            except (KeyError, json.JSONDecodeError, IndexError):
+                                pass
+            except requests.exceptions.RequestException as e:
+                yield f"❌ Ошибка сети: {e}"
 
-        # Запускаем вывод на экран
         st.write_stream(stream_direct)
