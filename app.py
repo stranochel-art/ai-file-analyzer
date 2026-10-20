@@ -103,7 +103,7 @@ if uploaded_file is not None:
 
         # Выбираем текущий ключ
         current_key = api_keys[st.session_state.current_key_index]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={current_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key={current_key}"
         
         def stream_direct():
             try:
