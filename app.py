@@ -95,7 +95,7 @@ if uploaded_file is not None:
                 }]
             }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse&key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-light:streamGenerateContent?alt=sse&key={api_key}"
         
         start_time = time.time()
 
