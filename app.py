@@ -17,23 +17,23 @@ import PyPDF2
 import docx
 
 # ==================== НАСТРОЙКИ ====================
-# Модель по умолчанию — 3.6-flash: на вашем ключе она быстрая и поддерживает
-# уровень "minimal", который реально убирает задержку на рассуждения.
-# 3.8-flash оставлен в списке — включайте, когда нужен именно глубокий разбор.
-MODELS = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
 
-# Какие уровни размышлений поддерживает каждая модель
+# Запасная модель: на неё уходим, если основная стоит в очереди
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
+
 THINKING_LEVELS = {
-    "gemini-3.6-flash":    ["minimal", "low", "medium", "high"],
-    "gemini-3.8-flash":    ["low", "medium", "high"],   # minimal у 3.8 недоступен
+    "gemini-3.6-flash":      ["minimal", "low", "medium", "high"],
+    "gemini-3.8-flash":      ["low", "medium", "high"],   # minimal у 3.8 недоступен
     "gemini-3.5-flash-lite": ["minimal", "low", "medium", "high"],
 }
 
-# Сколько токенов ответа разрешить (включает и thinking-токены!)
 MAX_OUTPUT_BY_THINKING = {"minimal": 1024, "low": 1024, "medium": 2048, "high": 4096}
 
-MAX_CHARS = 15000   # вернули как было: 60000 упиралось в лимит токенов/минуту
-# requirements.txt не изменился: streamlit, requests, Pillow, PyPDF2, python-docx
+MAX_CHARS      = 15000
+STALL_SECONDS  = 8    # сколько ждём ПЕРВЫЙ байт / следующий байт потока
+MAX_ATTEMPTS   = 4    # сколько связок "ключ+модель" пробуем подряд
+# requirements.txt: streamlit, requests, Pillow, PyPDF2, python-docx
 # ===================================================
 
 st.set_page_config(page_title="Анализатор", layout="centered")
@@ -60,25 +60,24 @@ for key in ["extracted_text", "image_b64", "processed_file_name"]:
         st.session_state[key] = None
 
 
-def diagnose(ttfb, total, prompt_tokens, thoughts, answer_tokens, cached):
-    """Короткий вердикт по цифрам, чтобы не гадать, где тормозит."""
+def diagnose(ttfb, total, prompt_tokens, thoughts, answer_tokens, cached, attempts):
+    if attempts > 1:
+        return (f"Основной канал стоял в очереди, ответ пришёл с {attempts}-й попытки. "
+                "Это троттлинг бесплатного тарифа, а не ваш код.")
+    if ttfb and ttfb > 20 and prompt_tokens < 2000 and thoughts == 0:
+        return ("Очередь бесплатного тарифа: вход крошечный, рассуждений ноль, "
+                "а ждали до первого байта долго. Помогает запасная модель/другой ключ, "
+                "а радикально — отдельный быстрый провайдер (Groq LPU, первый токен <1 с).")
     if ttfb and ttfb > 25 and prompt_tokens > 8000:
-        return ("Упор в лимит токенов/минуту бесплатного тарифа: большой вход "
-                f"({prompt_tokens} ток.) ставится в очередь. Уменьшите MAX_CHARS "
-                "или добавьте второй ключ в GEMINI_API_KEYS.")
+        return (f"Упор в лимит токенов/минуту: вход {prompt_tokens} ток. "
+                "Уменьшите MAX_CHARS или добавьте ключей.")
     if thoughts > 800:
-        return (f"Модель сожгла {thoughts} ток. на внутренние рассуждения до первого "
-                "символа. Поставьте уровень размышлений ниже (minimal/low).")
+        return (f"{thoughts} ток. ушло на внутренние рассуждения. Поставьте уровень ниже.")
     if ttfb and ttfb < 6 and total > 40:
-        return (f"Старт быстрый ({ttfb:.1f} с), но ответ длинный ({answer_tokens} ток.). "
-                "Снизьте лимит ответа или попросите «ответь в 5 предложениях».")
-    if ttfb and ttfb > 25:
-        return ("Запрос маленький, а ожидание большое — очередь/троттлинг на стороне API "
-                "именно для этой модели. Попробуйте другую модель или другой ключ.")
+        return ("Старт быстрый, ответ длинный. Снизьте лимит ответа или попросите короче.")
     if prompt_tokens > 4000 and cached == 0:
-        return ("Работает в норме, но префикс не попадает в кэш Google: проверьте, что "
-                "текст документа идёт первым партсом, а вопрос — последним.")
-    return "Норма: задержка соответствует выбранной модели и уровню размышлений."
+        return ("Норма, но префикс не кэшируется: текст документа должен идти первым партсом.")
+    return "Норма."
 
 
 uploaded_file = st.file_uploader(
@@ -135,9 +134,7 @@ if uploaded_file is not None:
         with col_t:
             levels = THINKING_LEVELS[model]
             thinking_level = st.selectbox(
-                "Размышления",
-                levels,
-                index=0,
+                "Размышления", levels, index=0,
                 help="minimal/low = быстро. medium/high = дольше, но лучше на сложных задачах."
             )
         with col_b:
@@ -148,116 +145,142 @@ if uploaded_file is not None:
     if submitted:
         st.markdown("### Ответ:")
 
-        generation_config = {
-            "thinkingConfig": {"thinkingLevel": thinking_level},
-            "maxOutputTokens": MAX_OUTPUT_BY_THINKING.get(thinking_level, 1024),
-        }
-
         if st.session_state.image_b64:
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"inlineData": {"mimeType": "image/jpeg", "data": st.session_state.image_b64}},
-                        {"text": user_prompt}
-                    ]
-                }],
-                "generationConfig": generation_config
-            }
+            base_parts = [
+                {"inlineData": {"mimeType": "image/jpeg", "data": st.session_state.image_b64}},
+                {"text": user_prompt}
+            ]
         else:
             safe_text = st.session_state.extracted_text[:MAX_CHARS]
-            payload = {
-                "contents": [{
-                    "parts": [
-                        # Документ ПЕРВЫМ, вопрос ПОСЛЕДНИМ: префикс запроса совпадает
-                        # между разными вопросами к одному файлу -> работает кэш Google.
-                        {"text": f"Текст:\n{safe_text}"},
-                        {"text": f"\n\nЗадача: {user_prompt}"}
-                    ]
-                }],
-                "generationConfig": generation_config
-            }
+            base_parts = [
+                # Документ ПЕРВЫМ, вопрос ПОСЛЕДНИМ — так работает кэш префикса Google.
+                {"text": f"Текст:\n{safe_text}"},
+                {"text": f"\n\nЗадача: {user_prompt}"}
+            ]
 
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:streamGenerateContent?alt=sse")
+        payload = {"contents": [{"parts": base_parts}]}
 
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
-            "x-goog-api-key": ""   # ключ в заголовке, а не в URL (не светится в логах)
+            "x-goog-api-key": ""
         }
+
+        # Порядок попыток: выбранная модель на всех ключах, затем запасная модель.
+        fallback = FALLBACK_MODEL if FALLBACK_MODEL != model else "gemini-3.6-flash"
+        plan = []
+        for m in [model, fallback]:
+            for i in range(len(api_keys)):
+                plan.append((m, (st.session_state.current_key_index + i) % len(api_keys)))
+        plan = plan[:MAX_ATTEMPTS]
 
         start_time = time.time()
         st.session_state.ttfb = None
         st.session_state.last_usage = {}
+        attempt_log = []
 
         def stream_direct():
             first_chunk = True
-            total_keys = len(api_keys)
-            start_index = st.session_state.current_key_index
+            got_text = False
+            used_model = model
 
-            # Перебор ключей ВНУТРИ одного запуска: при 429 сразу берём следующий,
-            # а не просим пользователя нажать кнопку ещё раз.
-            for i in range(total_keys):
-                key_index = (start_index + i) % total_keys
+            for attempt, (m, key_index) in enumerate(plan, start=1):
+                # уровень размышлений мог не поддерживаться запасной моделью
+                lvl = thinking_level if thinking_level in THINKING_LEVELS[m] else THINKING_LEVELS[m][0]
+                payload["generationConfig"] = {
+                    "thinkingConfig": {"thinkingLevel": lvl},
+                    "maxOutputTokens": MAX_OUTPUT_BY_THINKING.get(lvl, 1024),
+                }
                 headers["x-goog-api-key"] = api_keys[key_index]
+                url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                       f"{m}:streamGenerateContent?alt=sse")
+                tag = f"{m} / ключ №{key_index + 1}"
 
                 try:
+                    # timeout=(подключение, ожидание байта): STALL_SECONDS — детектор очереди.
                     response = st.session_state.http_session.post(
-                        url, json=payload, headers=headers, stream=True
+                        url, json=payload, headers=headers, stream=True,
+                        timeout=(10, STALL_SECONDS)
                     )
+                except requests.exceptions.Timeout:
+                    attempt_log.append(f"{tag}: тишина {STALL_SECONDS} с — очередь, пробуем дальше")
+                    continue
                 except requests.exceptions.RequestException as e:
+                    attempt_log.append(f"{tag}: сетевая ошибка {e}")
                     yield f"Сетевая ошибка: {e}"
                     return
 
                 if response.status_code in (429, 403):
-                    st.session_state.current_key_index = (key_index + 1) % total_keys
+                    response.close()
+                    attempt_log.append(f"{tag}: {response.status_code} — лимит ключа")
+                    st.session_state.current_key_index = (key_index + 1) % len(api_keys)
                     continue
 
                 if response.status_code == 503:
-                    yield "Серверы Google сейчас перегружены. Пожалуйста, нажмите кнопку 'Проанализировать' еще раз."
-                    return
+                    response.close()
+                    attempt_log.append(f"{tag}: 503 перегрузка")
+                    continue
 
                 if response.status_code != 200:
-                    yield f"Ошибка API ({response.status_code}): {response.text[:300]}"
+                    body = response.text[:300]
+                    response.close()
+                    yield f"Ошибка API ({response.status_code}): {body}"
                     return
 
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    decoded_line = line.decode('utf-8')
-                    if not decoded_line.startswith("data: "):
-                        continue
-                    try:
-                        data = json.loads(decoded_line[6:])
-                    except json.JSONDecodeError:
-                        continue
+                used_model = m
+                attempt_log.append(f"{tag}: принят, жду первый токен")
 
-                    # служебная статистика приходит в последнем чанке
-                    if data.get("usageMetadata"):
-                        st.session_state.last_usage = data["usageMetadata"]
+                try:
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        decoded_line = line.decode('utf-8')
+                        if not decoded_line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(decoded_line[6:])
+                        except json.JSONDecodeError:
+                            continue
 
-                    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                    for part in parts:
-                        if part.get("thought"):        # внутренние рассуждения — не в ответ
-                            continue
-                        text_chunk = part.get("text")
-                        if not text_chunk:
-                            continue
-                        if first_chunk:
-                            st.session_state.ttfb = time.time() - start_time
-                            st.toast(f"Отклик: {st.session_state.ttfb:.1f} сек.")
-                            first_chunk = False
-                        yield text_chunk
+                        if data.get("usageMetadata"):
+                            st.session_state.last_usage = data["usageMetadata"]
+
+                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        for part in parts:
+                            if part.get("thought"):
+                                continue
+                            text_chunk = part.get("text")
+                            if not text_chunk:
+                                continue
+                            if first_chunk:
+                                st.session_state.ttfb = time.time() - start_time
+                                st.toast(f"Отклик: {st.session_state.ttfb:.1f} сек. ({m})")
+                                first_chunk = False
+                            got_text = True
+                            yield text_chunk
+                except requests.exceptions.Timeout:
+                    response.close()
+                    if got_text:
+                        attempt_log.append(f"{tag}: поток оборвался на середине")
+                        yield "\n\n_…поток оборвался, ответ неполный._"
+                        return
+                    attempt_log.append(f"{tag}: поток встал — пробуем дальше")
+                    continue
+                finally:
+                    response.close()
 
                 st.session_state.current_key_index = key_index
+                st.session_state.used_model = used_model
                 return
 
-            yield "Ошибка: Лимиты на всех ключах исчерпаны. Повторите примерно через минуту."
+            st.session_state.used_model = used_model
+            yield ("Ошибка: все ключи и запасная модель сейчас в очереди или в лимите. "
+                   "Повторите примерно через минуту.")
 
         st.write_stream(stream_direct)
 
-        # ==================== ДИАГНОСТИКА СКОРОСТИ ====================
+        # ==================== ДИАГНОСТИКА ====================
         u = st.session_state.last_usage or {}
         ttfb = st.session_state.ttfb or 0
         total = time.time() - start_time
@@ -265,19 +288,23 @@ if uploaded_file is not None:
         thoughts = u.get("thoughtsTokenCount", 0)
         answer_tokens = u.get("candidatesTokenCount", 0)
         cached = u.get("cachedContentTokenCount", 0)
+        attempts = len(attempt_log)
 
-        with st.expander("Замеры и вердикт"):
+        with st.expander("Замеры и вердикт", expanded=attempts > 1):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Первый токен", f"{ttfb:.1f} с")
             c2.metric("Всего", f"{total:.1f} с")
             c3.metric("Thinking", f"{thoughts} ток.")
             c4.metric("Ответ", f"{answer_tokens} ток.")
             st.caption(
-                f"модель: {model} · размышления: {thinking_level} · "
-                f"вход: {prompt_tokens} ток. · из кэша: {cached} ток. · "
-                f"ключей в пуле: {len(api_keys)}"
+                f"модель: {st.session_state.get('used_model', model)} · "
+                f"размышления: {thinking_level} · вход: {prompt_tokens} ток. · "
+                f"из кэша: {cached} ток. · попыток: {attempts}"
             )
+            for line in attempt_log:
+                st.caption(f"• {line}")
             if u:
-                st.info(diagnose(ttfb, total, prompt_tokens, thoughts, answer_tokens, cached))
+                st.info(diagnose(ttfb, total, prompt_tokens, thoughts,
+                                 answer_tokens, cached, attempts))
             else:
-                st.warning("Статистика от API не пришла — вероятно, ответ оборвался с ошибкой.")
+                st.warning("Статистика от API не пришла — ответ оборвался с ошибкой.")
